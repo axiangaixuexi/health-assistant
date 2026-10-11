@@ -1,0 +1,45 @@
+[project]
+name = "backend"
+version = "0.4.0"
+description = "大健康智能助手后端：FastAPI + LangGraph 多智能体编排、RAG 知识库与 SSE 流式接口"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.133.1",
+    "langchain-core>=1.2.16",
+    "langchain-openai>=1.1.10",
+    "langgraph>=1.0.9",
+    "openai>=2.24.0",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.41.0",
+    # RAG core
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "rank-bm25>=0.2.2",
+    # Embedding backends
+    "langchain-huggingface>=0.1.0",
+    # Vector store backends
+    "langchain-chroma>=0.2.0",
+    "chromadb>=0.5.0",
+    # Optional vector store backends (activate via VECTOR_STORE env var)
+    "faiss-cpu>=1.8.0",
+    "langchain-qdrant>=0.2.0",
+    "langchain-postgres>=0.0.12",
+    "sentence-transformers>=5.3.0",
+    "opentelemetry-sdk>=1.40.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.40.0",
+    "openinference-instrumentation-langchain>=0.1.70",
+    "openinference-instrumentation-openai>=0.1.54",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[project.optional-dependencies]
+eval = [
+    "deepeval>=4.1.8",
+]

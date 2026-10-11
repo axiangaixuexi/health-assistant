@@ -1,0 +1,27 @@
+# === 密钥 / 环境变量（绝不能提交）===
+backend/.env
+.env
+*.local
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+
+# === 本地数据 / 向量库 / checkpoint ===
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+backend/rag/chroma_db/
+
+# === 前端 ===
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.log
+
+# === IDE / 系统 ===
+.idea/
+.vscode/
+.DS_Store

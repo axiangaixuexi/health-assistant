@@ -1,0 +1,264 @@
+// @refresh reset
+import { createContext, useContext, useState, useCallback, useRef, useEffect, type ReactNode } from 'react';
+import type { ChatMode, ChatMessage, ChatCardPayload, ScanType, ThreadId } from '../types';
+import { USER_NAME } from '../data/mockData';
+
+// Per-mode config used to auto-generate Welcome and Exit cards
+const MODE_CARD_CONFIG: Record<string, { title: string; description: string; exitTitle: string }> = {
+    clinic: {
+        title: '🩺 AI 辅助诊室已开启',
+        description: '您好！我是您的专属线上医生助手。请告诉我您主要哪里不舒服？大概持续多久了？',
+        exitTitle: '已结束本次问诊',
+    },
+    insurance: {
+        title: '🏦 医保服务大厅已开启',
+        description: '可以帮您查询医保余额、消费记录、缴费明细等，请问需要什么帮助？',
+        exitTitle: '医保咨询已结束',
+    },
+    pharmacy: {
+        title: '💊 药管家模式已开启',
+        description: '您可以上传药盒图片，或直接告诉我药品名称，我来帮您查询药效、注意事项和附近药店。',
+        exitTitle: '药管家服务已结束',
+    },
+    report: {
+        title: '📋 报告解读模式已开启',
+        description: '请发送您的检查报告图片，或直接描述检查指标数值，我来为您进行 AI 解读。',
+        exitTitle: '报告解读已结束',
+    },
+};
+
+// Persist the server-side thread id and the visible chat history across page
+// reloads so a restart keeps the conversation (the backend checkpointer holds
+// the full history keyed by thread id, but the client must remember that id).
+const STORAGE_THREAD_KEY = 'ha:threadId';
+const STORAGE_MESSAGES_KEY = 'ha:messages';
+
+const buildWelcomeMessage = (): ChatMessage => ({
+    id: 'msg-1',
+    role: 'assistant',
+    text: `你好，${USER_NAME}！我是大健康智能助手，愿你时刻好心情。今天有什么我可以帮你的吗？`,
+    timestamp: Date.now(),
+});
+
+const loadThreadId = (): ThreadId | null => {
+    try {
+        return localStorage.getItem(STORAGE_THREAD_KEY);
+    } catch {
+        return null;
+    }
+};
+
+const loadMessages = (): ChatMessage[] => {
+    try {
+        const raw = localStorage.getItem(STORAGE_MESSAGES_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw) as ChatMessage[];
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                return parsed.map(m => (m.isGenerating ? { ...m, isGenerating: false } : m));
+            }
+        }
+    } catch {
+        // corrupt or unavailable storage — fall back to a fresh conversation
+    }
+    return [buildWelcomeMessage()];
+};
+
+interface GlobalState {
+    isElderMode: boolean;
+    setIsElderMode: (val: boolean | ((prev: boolean) => boolean)) => void;
+
+    chatMode: ChatMode;
+    setChatMode: (mode: ChatMode) => void;
+    /** Enter a mode and inject a Welcome Card into the chat */
+    enterChatMode: (mode: ChatMode) => void;
+    /** Exit current mode and inject an Exit Card into the chat */
+    exitChatMode: () => void;
+
+    messages: ChatMessage[];
+    setMessages: (msgs: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
+
+    /**
+     * Server-side LangGraph conversation id. `null` until the backend issues one
+     * through the `session` SSE event; once set, only the newest user message is
+     * sent and the checkpointer supplies the history.
+     */
+    threadId: ThreadId | null;
+    setThreadId: (id: ThreadId | null) => void;
+    /** Drop the server-side conversation and start a brand new thread. */
+    resetThread: () => void;
+
+    isScanning: boolean;
+    setIsScanning: (val: boolean) => void;
+    scanType: ScanType;
+    setScanType: (type: ScanType) => void;
+}
+
+const GlobalContext = createContext<GlobalState | undefined>(undefined);
+
+export const GlobalProvider = ({ children }: { children: ReactNode }) => {
+    const [isElderMode, setIsElderMode] = useState(false);
+    const [chatMode, setChatMode] = useState<ChatMode>('general');
+    const chatModeRef = useRef<ChatMode>('general');
+
+    const [messages, setMessages] = useState<ChatMessage[]>(loadMessages);
+
+    const [isScanning, setIsScanning] = useState(false);
+    const [scanType, setScanType] = useState<ScanType>('药盒');
+    const [threadId, setThreadId] = useState<ThreadId | null>(loadThreadId);
+
+    // Keep the thread id persisted so the backend can resume the same
+    // checkpointer thread after a reload.
+    useEffect(() => {
+        try {
+            if (threadId) {
+                localStorage.setItem(STORAGE_THREAD_KEY, threadId);
+            } else {
+                localStorage.removeItem(STORAGE_THREAD_KEY);
+            }
+        } catch {
+            // storage unavailable — persistence is best-effort
+        }
+    }, [threadId]);
+
+    // Debounce so streaming token updates don't rewrite storage on every chunk.
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            try {
+                const persistable = messages.map(m =>
+                    m.isGenerating ? { ...m, isGenerating: false } : m
+                );
+                localStorage.setItem(STORAGE_MESSAGES_KEY, JSON.stringify(persistable));
+            } catch {
+                // quota / serialization errors are non-fatal
+            }
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [messages]);
+
+    const resetThread = useCallback(() => setThreadId(null), []);
+
+    const enterChatMode = useCallback((mode: ChatMode) => {
+        if (mode === 'general' || mode === 'dashboard') {
+            setChatMode(mode);
+            chatModeRef.current = mode;
+            return;
+        }
+
+        // Use ref to prevent duplicate triggers (Strict Mode safe)
+        if (chatModeRef.current === mode) return;
+
+        chatModeRef.current = mode;
+        setChatMode(mode);
+
+        const config = MODE_CARD_CONFIG[mode];
+        if (config) {
+            const welcomeCard: ChatCardPayload = {
+                type: 'mode_welcome',
+                mode,
+                title: config.title,
+                description: config.description,
+            };
+
+            setMessages(msgs => {
+                const newMsgs = [...msgs];
+                if (newMsgs.length > 0) {
+                    const lastMsg = newMsgs[newMsgs.length - 1];
+                    // If the last message is actively being generated by the assistant,
+                    // attach the welcome card directly to it so it renders above the text bubble.
+                    if (lastMsg.role === 'assistant' && lastMsg.isGenerating) {
+                        return [
+                            ...newMsgs.slice(0, -1),
+                            {
+                                ...lastMsg,
+                                cards: [...(lastMsg.cards || []), welcomeCard]
+                            }
+                        ];
+                    }
+                }
+
+                // Fallback: append as a separate message
+                return [
+                    ...newMsgs,
+                    {
+                        id: `system-welcome-${mode}-${Date.now()}`,
+                        role: 'assistant',
+                        text: '',
+                        timestamp: Date.now(),
+                        cards: [welcomeCard],
+                    }
+                ];
+            });
+        }
+    }, []);
+
+    const exitChatMode = useCallback(() => {
+        const mode = chatModeRef.current;
+        // Leaving a specialized mode ends the server-side conversation too, so
+        // the next message starts a fresh checkpointer thread.
+        setThreadId(null);
+        if (mode === 'general' || mode === 'dashboard') return;
+
+        chatModeRef.current = 'general';
+        setChatMode('general');
+
+        const config = MODE_CARD_CONFIG[mode];
+        if (config) {
+            const exitCard: ChatCardPayload = {
+                type: 'mode_exit',
+                mode,
+                title: config.exitTitle,
+            };
+
+            setMessages(msgs => {
+                const newMsgs = [...msgs];
+                if (newMsgs.length > 0) {
+                    const lastMsg = newMsgs[newMsgs.length - 1];
+                    // If the last message is actively being generated by the assistant,
+                    // attach the exit card directly to it.
+                    if (lastMsg.role === 'assistant' && lastMsg.isGenerating) {
+                        return [
+                            ...newMsgs.slice(0, -1),
+                            {
+                                ...lastMsg,
+                                cards: [...(lastMsg.cards || []), exitCard]
+                            }
+                        ];
+                    }
+                }
+
+                // Fallback: append as a separate message
+                return [
+                    ...newMsgs,
+                    {
+                        id: `system-exit-${mode}-${Date.now()}`,
+                        role: 'assistant',
+                        text: '',
+                        timestamp: Date.now(),
+                        cards: [exitCard]
+                    }
+                ];
+            });
+        }
+    }, []);
+
+    return (
+        <GlobalContext.Provider value={{
+            isElderMode, setIsElderMode,
+            chatMode, setChatMode, enterChatMode, exitChatMode,
+            messages, setMessages,
+            threadId, setThreadId, resetThread,
+            isScanning, setIsScanning,
+            scanType, setScanType
+        }}>
+            {children}
+        </GlobalContext.Provider>
+    );
+};
+
+export const useGlobalStore = () => {
+    const context = useContext(GlobalContext);
+    if (context === undefined) {
+        throw new Error('useGlobalStore must be used within a GlobalProvider');
+    }
+    return context;
+};
